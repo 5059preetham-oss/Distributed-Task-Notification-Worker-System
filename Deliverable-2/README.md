@@ -55,8 +55,12 @@ From this directory:
    ```
 
    If the controller runs on the VM host rather than inside Mininet, use the
-   host-reachable controller address in `--sdn-host`. Metrics are sent using
-   newline-delimited JSON over TCP/5001.
+   The topology creates a root-namespace `controller-host` at `10.0.0.254`,
+   so metrics are sent using newline-delimited JSON over TCP/5001:
+
+   ```text
+   mininet> broker python3 broker.py --sdn-host 10.0.0.254 --demo-tasks 4 &
+   ```
 
 4. Start two workers:
 
@@ -86,8 +90,15 @@ python3 -m unittest -v test_protocol.py
 python3 -m py_compile protocol.py broker.py worker.py topo.py controller.py
 ```
 
-For the performance comparison, repeat the demo with 1 and 2 workers and
-record:
+For a reproducible local performance comparison, run:
+
+```bash
+python3 benchmark.py --tasks 12
+```
+
+The benchmark compares the original static one-worker baseline, dynamic
+two-worker scheduling, and dynamic scheduling with one worker failing before
+its first result. It records:
 
 * task completion time: broker queue time to the final `[RESULT]`;
 * throughput: completed tasks divided by elapsed seconds;
@@ -95,10 +106,24 @@ record:
 * recovery time: worker termination to `[DISPATCH]` on the replacement worker;
 * failure rate: tasks in `[FAILED]` divided by submitted tasks.
 
-Use the original Deliverable-1 implementation as the static single-worker
-baseline. The final implementation should improve throughput with two workers
-and preserve completion through a worker failure, while the SDN controller
-removes forwarding flows for the failed worker.
+Example local loopback run (`python3 benchmark.py --tasks 12`, Windows host,
+November 2026):
+
+| Scenario | Workers | Completed | Elapsed (s) | Throughput (tasks/s) | Recovery (s) |
+|---|---:|---:|---:|---:|---:|
+| Static baseline | 1 | 12 | 0.732 | 16.38 | - |
+| Dynamic load balancing | 2 | 12 | 0.489 | 24.55 | - |
+| Dynamic + worker failure | 2 | 12 | 0.760 | 15.79 | 0.760 |
+
+These are local loopback measurements, not Mininet measurements. Run the
+benchmark in the target Ubuntu VM and include that output in the final report
+for environment-specific results.
+
+Use the first row as the static single-worker baseline. The final
+implementation should improve throughput with two workers and preserve
+completion through a worker failure, while the SDN controller removes
+forwarding flows for the failed worker and blocks new TCP connection attempts
+from workers whose reported load reaches `MAX_LOAD`.
 
 ## Rubric coverage
 
@@ -108,6 +133,8 @@ removes forwarding flows for the failed worker.
   acknowledgements, heartbeats, timeouts, duplicate-ID rejection, and bounded
   input validation.
 * **D2 dynamic SDN:** broker metrics cause controller flow installation/removal.
+  Bootstrap flows cover broker/worker traffic before registration; workload
+  metrics install a higher-priority TCP SYN drop for overloaded workers.
 * **D2 robustness:** worker disconnect and task timeout requeue unfinished tasks.
-* **D2 performance:** repeatable one-worker/two-worker/failure experiments and
-  measurable metrics are specified above.
+* **D2 performance:** `benchmark.py` performs repeatable one-worker,
+  two-worker, and failure experiments and prints throughput and recovery data.

@@ -20,16 +20,20 @@ def run_topology() -> None:
     broker = net.addHost("broker", ip="10.0.0.10/24")
     worker1 = net.addHost("w1", ip="10.0.0.1/24")
     worker2 = net.addHost("w2", ip="10.0.0.2/24")
+    controller_host = net.addHost(
+        "controller-host", ip="10.0.0.254/24", inNamespace=False
+    )
     net.addLink(broker, switch)
     net.addLink(worker1, switch)
     net.addLink(worker2, switch)
+    net.addLink(controller_host, switch)
 
     info("*** Starting broker/worker SDN topology\n")
     net.build()
     controller.start()
     switch.start([controller])
     info("*** Hosts: broker=10.0.0.10, w1=10.0.0.1, w2=10.0.0.2\n")
-    info("*** TCP application port: 5000; SDN metrics port: 5001\n")
+    info("*** TCP application port: 5000; TCP SDN metrics port: 5001\n")
     CLI(net)
     net.stop()
 

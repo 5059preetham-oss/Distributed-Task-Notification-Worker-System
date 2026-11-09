@@ -35,6 +35,13 @@ class Worker:
         with self.send_lock:
             conn.sendall(encode_message(message))
 
+    def _heartbeat_loop(self, conn: socket.socket) -> None:
+        while not self.stop_event.wait(self.heartbeat_interval):
+            try:
+                self.send(conn, {"type": "HEARTBEAT", "worker_id": self.worker_id})
+            except OSError:
+                return
+
     def run(self) -> None:
         print(
             f"[WORKER {self.worker_id}] connecting to "
@@ -46,12 +53,7 @@ class Worker:
             self.send(conn, {"type": "REGISTER", "worker_id": self.worker_id})
             buffer = b""
             registered = False
-            last_heartbeat = 0.0
             while not self.stop_event.is_set():
-                now = time.monotonic()
-                if registered and now - last_heartbeat >= self.heartbeat_interval:
-                    self.send(conn, {"type": "HEARTBEAT", "worker_id": self.worker_id})
-                    last_heartbeat = now
                 try:
                     chunk = conn.recv(4096)
                 except socket.timeout:
@@ -63,28 +65,40 @@ class Worker:
                     message_type = message.get("type")
                     if message_type == "REGISTERED":
                         registered = True
+                        threading.Thread(
+                            target=self._heartbeat_loop, args=(conn,), daemon=True
+                        ).start()
                         print(f"[WORKER {self.worker_id}] registered", flush=True)
                     elif message_type == "TASK":
                         task_id = validate_string(message, "task_id")
                         payload = validate_string(message, "payload", 4096)
                         print(f"[TASK] {task_id}: {payload}", flush=True)
-                        result = process_task(payload)
-                        self.send(
-                            conn,
-                            {
-                                "type": "RESULT",
-                                "task_id": task_id,
-                                "worker_id": self.worker_id,
-                                "result": result,
-                            },
-                        )
-                        print(f"[RESULT] {task_id} sent", flush=True)
+                        threading.Thread(
+                            target=self._process_and_report,
+                            args=(conn, task_id, payload),
+                            daemon=True,
+                        ).start()
                     elif message_type == "RESULT_ACK":
                         print(f"[ACK] {message.get('task_id')}", flush=True)
                     elif message_type == "HEARTBEAT_ACK":
                         continue
                     else:
                         print(f"[WORKER] ignored message: {message}", flush=True)
+
+    def _process_and_report(
+        self, conn: socket.socket, task_id: str, payload: str
+    ) -> None:
+        result = process_task(payload)
+        self.send(
+            conn,
+            {
+                "type": "RESULT",
+                "task_id": task_id,
+                "worker_id": self.worker_id,
+                "result": result,
+            },
+        )
+        print(f"[RESULT] {task_id} sent", flush=True)
 
 
 def parse_args() -> argparse.Namespace:

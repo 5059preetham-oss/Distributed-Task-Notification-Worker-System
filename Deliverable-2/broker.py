@@ -152,7 +152,12 @@ class Broker:
                             flush=True,
                         )
                     except OSError:
+                        self._requeue_task(task, "send failure")
                         self._remove_worker(worker.worker_id, "send failure")
+                        available = sorted(
+                            self.workers.values(),
+                            key=lambda item: (len(item.assigned), item.worker_id),
+                        )
                     available.sort(key=lambda item: (len(item.assigned), item.worker_id))
             self._send_metrics()
 

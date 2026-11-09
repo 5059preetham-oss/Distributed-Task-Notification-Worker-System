@@ -18,8 +18,12 @@ from ryu.ofproto import ofproto_v1_3
 class TaskController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     WORKER_PORTS = {"10.0.0.1": 2, "10.0.0.2": 3}
+    BROKER_IP = "10.0.0.10"
+    CONTROLLER_IP = "10.0.0.254"
+    CONTROLLER_PORT = 4
     TCP_PORT = 5000
     METRICS_PORT = 5001
+    MAX_LOAD = 2
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -39,6 +43,53 @@ class TaskController(app_manager.RyuApp):
     def switch_features_handler(self, ev: Any) -> None:
         datapath = ev.msg.datapath
         parser = datapath.ofproto_parser
+        self._add_flow(
+            datapath,
+            200,
+            parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_dst=self.BROKER_IP,
+                ip_proto=6,
+                tcp_dst=self.TCP_PORT,
+            ),
+            [parser.OFPActionOutput(1)],
+        )
+        for worker_ip, port in self.WORKER_PORTS.items():
+            self._add_flow(
+                datapath,
+                200,
+                parser.OFPMatch(
+                    eth_type=0x0800,
+                    ipv4_src=self.BROKER_IP,
+                    ipv4_dst=worker_ip,
+                    ip_proto=6,
+                    tcp_src=self.TCP_PORT,
+                ),
+                [parser.OFPActionOutput(port)],
+            )
+        self._add_flow(
+            datapath,
+            200,
+            parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_dst=self.CONTROLLER_IP,
+                ip_proto=6,
+                tcp_dst=self.METRICS_PORT,
+            ),
+            [parser.OFPActionOutput(self.CONTROLLER_PORT)],
+        )
+        self._add_flow(
+            datapath,
+            200,
+            parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src=self.CONTROLLER_IP,
+                ipv4_dst=self.BROKER_IP,
+                ip_proto=6,
+                tcp_src=self.METRICS_PORT,
+            ),
+            [parser.OFPActionOutput(1)],
+        )
         self._add_flow(
             datapath,
             0,
@@ -62,23 +113,40 @@ class TaskController(app_manager.RyuApp):
 
     def _delete_worker_flow(self, datapath: Any, worker_ip: str) -> None:
         parser = datapath.ofproto_parser
-        match = parser.OFPMatch(
-            eth_type=0x0800, ipv4_dst=worker_ip, ip_proto=6, tcp_dst=self.TCP_PORT
-        )
-        datapath.send_msg(
-            parser.OFPFlowMod(
-                datapath=datapath,
-                command=datapath.ofproto.OFPFC_DELETE,
-                out_port=datapath.ofproto.OFPP_ANY,
-                out_group=datapath.ofproto.OFPG_ANY,
-                match=match,
+        for match in (
+            parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src=self.BROKER_IP,
+                ipv4_dst=worker_ip,
+                ip_proto=6,
+                tcp_src=self.TCP_PORT,
+            ),
+            parser.OFPMatch(
+                eth_type=0x0800,
+                ipv4_src=worker_ip,
+                ipv4_dst=self.BROKER_IP,
+                ip_proto=6,
+                tcp_dst=self.TCP_PORT,
+            ),
+        ):
+            datapath.send_msg(
+                parser.OFPFlowMod(
+                    datapath=datapath,
+                    command=datapath.ofproto.OFPFC_DELETE,
+                    out_port=datapath.ofproto.OFPP_ANY,
+                    out_group=datapath.ofproto.OFPG_ANY,
+                    match=match,
+                )
             )
-        )
 
     def _install_worker_flow(self, datapath: Any, worker_ip: str) -> None:
         parser = datapath.ofproto_parser
         match = parser.OFPMatch(
-            eth_type=0x0800, ipv4_dst=worker_ip, ip_proto=6, tcp_dst=self.TCP_PORT
+            eth_type=0x0800,
+            ipv4_src=self.BROKER_IP,
+            ipv4_dst=worker_ip,
+            ip_proto=6,
+            tcp_src=self.TCP_PORT,
         )
         self._add_flow(
             datapath,
@@ -86,6 +154,29 @@ class TaskController(app_manager.RyuApp):
             match,
             [parser.OFPActionOutput(self.WORKER_PORTS[worker_ip])],
         )
+
+    def _set_overload_rule(self, datapath: Any, worker_ip: str, overloaded: bool) -> None:
+        parser = datapath.ofproto_parser
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_src=worker_ip,
+            ipv4_dst=self.BROKER_IP,
+            ip_proto=6,
+            tcp_dst=self.TCP_PORT,
+            tcp_flags=2,
+        )
+        if overloaded:
+            self._add_flow(datapath, 250, match, [])
+        else:
+            datapath.send_msg(
+                parser.OFPFlowMod(
+                    datapath=datapath,
+                    command=datapath.ofproto.OFPFC_DELETE,
+                    out_port=datapath.ofproto.OFPP_ANY,
+                    out_group=datapath.ofproto.OFPG_ANY,
+                    match=match,
+                )
+            )
 
     def _listen_for_metrics(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -117,12 +208,18 @@ class TaskController(app_manager.RyuApp):
     def _apply_metrics(self, message: dict[str, Any]) -> None:
         if message.get("type") != "WORKER_METRICS":
             return
-        active_ips = {
-            item["ip"] for item in message.get("workers", []) if item.get("ip")
+        workers = {
+            item["ip"]: int(item.get("load", 0))
+            for item in message.get("workers", [])
+            if item.get("ip")
         }
         for datapath in list(self.datapaths.values()):
             for worker_ip in self.WORKER_PORTS:
-                if worker_ip in active_ips:
+                if worker_ip in workers:
                     self._install_worker_flow(datapath, worker_ip)
+                    self._set_overload_rule(
+                        datapath, worker_ip, workers[worker_ip] >= self.MAX_LOAD
+                    )
                 else:
                     self._delete_worker_flow(datapath, worker_ip)
+                    self._set_overload_rule(datapath, worker_ip, False)
