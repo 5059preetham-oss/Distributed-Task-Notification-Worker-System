@@ -1,33 +1,39 @@
-from mininet.net import Mininet
-from mininet.node import OVSKernelSwitch
+"""Mininet topology for the broker and two TCP workers."""
+
 from mininet.cli import CLI
-from mininet.log import setLogLevel, info
+from mininet.log import info, setLogLevel
+from mininet.net import Mininet
+from mininet.node import OVSKernelSwitch, RemoteController
 
-def run_topology():
-    # Create network without a controller, using standalone switch mode for native learning
-    net = Mininet(switch=OVSKernelSwitch, autoSetMacs=True)
 
-    info("*** Adding OpenFlow Switch (Standalone Mode)\n")
-    s1 = net.addSwitch('s1', failMode='standalone')
+def run_topology() -> None:
+    net = Mininet(
+        controller=RemoteController,
+        switch=OVSKernelSwitch,
+        autoSetMacs=True,
+        autoStaticArp=True,
+    )
+    controller = net.addController(
+        "c0", controller=RemoteController, ip="127.0.0.1", port=6653
+    )
+    switch = net.addSwitch("s1", protocols="OpenFlow13", failMode="secure")
+    broker = net.addHost("broker", ip="10.0.0.10/24")
+    worker1 = net.addHost("w1", ip="10.0.0.1/24")
+    worker2 = net.addHost("w2", ip="10.0.0.2/24")
+    net.addLink(broker, switch)
+    net.addLink(worker1, switch)
+    net.addLink(worker2, switch)
 
-    info("*** Adding Hosts (Broker and Workers)\n")
-    broker = net.addHost('broker', ip='10.0.0.10')
-    w1 = net.addHost('w1', ip='10.0.0.1')
-    w2 = net.addHost('w2', ip='10.0.0.2')
-
-    info("*** Creating Links\n")
-    net.addLink(broker, s1)
-    net.addLink(w1, s1)
-    net.addLink(w2, s1)
-
-    info("*** Starting Network\n")
-    net.start()
-
-    info("\n*** Network is live! Use the mininet prompt below:\n")
+    info("*** Starting broker/worker SDN topology\n")
+    net.build()
+    controller.start()
+    switch.start([controller])
+    info("*** Hosts: broker=10.0.0.10, w1=10.0.0.1, w2=10.0.0.2\n")
+    info("*** TCP application port: 5000; SDN metrics port: 5001\n")
     CLI(net)
-
     net.stop()
 
-if __name__ == '__main__':
-    setLogLevel('info')
+
+if __name__ == "__main__":
+    setLogLevel("info")
     run_topology()
