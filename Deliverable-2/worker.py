@@ -89,15 +89,19 @@ class Worker:
         self, conn: socket.socket, task_id: str, payload: str
     ) -> None:
         result = process_task(payload)
-        self.send(
-            conn,
-            {
-                "type": "RESULT",
-                "task_id": task_id,
-                "worker_id": self.worker_id,
-                "result": result,
-            },
-        )
+        try:
+            self.send(
+                conn,
+                {
+                    "type": "RESULT",
+                    "task_id": task_id,
+                    "worker_id": self.worker_id,
+                    "result": result,
+                },
+            )
+        except OSError:
+            self.stop_event.set()
+            return
         print(f"[RESULT] {task_id} sent", flush=True)
 
 
@@ -112,9 +116,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    worker = Worker(args.worker_id, args.broker_host, args.port, args.heartbeat)
     try:
-        Worker(args.worker_id, args.broker_host, args.port, args.heartbeat).run()
+        worker.run()
     except (ConnectionError, OSError) as exc:
+        worker.stop_event.set()
         print(f"[WORKER] stopped: {exc}", flush=True)
 
 

@@ -111,50 +111,6 @@ class TaskController(app_manager.RyuApp):
             )
         )
 
-    def _delete_worker_flow(self, datapath: Any, worker_ip: str) -> None:
-        parser = datapath.ofproto_parser
-        for match in (
-            parser.OFPMatch(
-                eth_type=0x0800,
-                ipv4_src=self.BROKER_IP,
-                ipv4_dst=worker_ip,
-                ip_proto=6,
-                tcp_src=self.TCP_PORT,
-            ),
-            parser.OFPMatch(
-                eth_type=0x0800,
-                ipv4_src=worker_ip,
-                ipv4_dst=self.BROKER_IP,
-                ip_proto=6,
-                tcp_dst=self.TCP_PORT,
-            ),
-        ):
-            datapath.send_msg(
-                parser.OFPFlowMod(
-                    datapath=datapath,
-                    command=datapath.ofproto.OFPFC_DELETE,
-                    out_port=datapath.ofproto.OFPP_ANY,
-                    out_group=datapath.ofproto.OFPG_ANY,
-                    match=match,
-                )
-            )
-
-    def _install_worker_flow(self, datapath: Any, worker_ip: str) -> None:
-        parser = datapath.ofproto_parser
-        match = parser.OFPMatch(
-            eth_type=0x0800,
-            ipv4_src=self.BROKER_IP,
-            ipv4_dst=worker_ip,
-            ip_proto=6,
-            tcp_src=self.TCP_PORT,
-        )
-        self._add_flow(
-            datapath,
-            100,
-            match,
-            [parser.OFPActionOutput(self.WORKER_PORTS[worker_ip])],
-        )
-
     def _set_overload_rule(self, datapath: Any, worker_ip: str, overloaded: bool) -> None:
         parser = datapath.ofproto_parser
         match = parser.OFPMatch(
@@ -171,10 +127,11 @@ class TaskController(app_manager.RyuApp):
             datapath.send_msg(
                 parser.OFPFlowMod(
                     datapath=datapath,
-                    command=datapath.ofproto.OFPFC_DELETE,
+                    command=datapath.ofproto.OFPFC_DELETE_STRICT,
                     out_port=datapath.ofproto.OFPP_ANY,
                     out_group=datapath.ofproto.OFPG_ANY,
                     match=match,
+                    priority=250,
                 )
             )
 
@@ -216,10 +173,10 @@ class TaskController(app_manager.RyuApp):
         for datapath in list(self.datapaths.values()):
             for worker_ip in self.WORKER_PORTS:
                 if worker_ip in workers:
-                    self._install_worker_flow(datapath, worker_ip)
                     self._set_overload_rule(
                         datapath, worker_ip, workers[worker_ip] >= self.MAX_LOAD
                     )
                 else:
-                    self._delete_worker_flow(datapath, worker_ip)
+                    # Keep bootstrap forwarding installed so a failed worker can
+                    # reconnect; only remove its temporary overload block.
                     self._set_overload_rule(datapath, worker_ip, False)

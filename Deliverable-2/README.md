@@ -54,13 +54,8 @@ From this directory:
    mininet> broker python3 broker.py --sdn-host 10.0.0.254 --demo-tasks 4 &
    ```
 
-   If the controller runs on the VM host rather than inside Mininet, use the
    The topology creates a root-namespace `controller-host` at `10.0.0.254`,
    so metrics are sent using newline-delimited JSON over TCP/5001:
-
-   ```text
-   mininet> broker python3 broker.py --sdn-host 10.0.0.254 --demo-tasks 4 &
-   ```
 
 4. Start two workers:
 
@@ -121,9 +116,9 @@ for environment-specific results.
 
 Use the first row as the static single-worker baseline. The final
 implementation should improve throughput with two workers and preserve
-completion through a worker failure, while the SDN controller removes
-forwarding flows for the failed worker and blocks new TCP connection attempts
-from workers whose reported load reaches `MAX_LOAD`.
+completion through a worker failure, while the SDN controller preserves
+forwarding for recovery and blocks new TCP connection attempts from workers
+whose reported load reaches `MAX_LOAD`.
 
 ## Rubric coverage
 
@@ -132,7 +127,9 @@ from workers whose reported load reaches `MAX_LOAD`.
 * **D2 complete functionality:** queueing, least-loaded scheduling, result
   acknowledgements, heartbeats, timeouts, duplicate-ID rejection, and bounded
   input validation.
-* **D2 dynamic SDN:** broker metrics cause controller flow installation/removal.
+* **D2 dynamic SDN:** broker metrics control higher-priority overload drops.
+  Bootstrap forwarding remains installed for registration and failed-worker
+  recovery.
   Bootstrap flows cover broker/worker traffic before registration; workload
   metrics install a higher-priority TCP SYN drop for overloaded workers.
 * **D2 robustness:** worker disconnect and task timeout requeue unfinished tasks.
