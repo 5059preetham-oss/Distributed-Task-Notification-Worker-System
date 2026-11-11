@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterator
+from typing import Any
 
 
 MAX_MESSAGE_BYTES = 64 * 1024
@@ -19,18 +19,20 @@ def encode_message(message: dict[str, Any]) -> bytes:
 def read_messages(buffer: bytes, chunk: bytes) -> tuple[bytes, list[dict[str, Any]]]:
     """Append a TCP chunk and return complete JSON messages plus the remaining bytes."""
     buffer += chunk
-    if len(buffer) > MAX_MESSAGE_BYTES:
-        raise ValueError("protocol buffer exceeded maximum size")
 
     messages: list[dict[str, Any]] = []
     while b"\n" in buffer:
         raw, buffer = buffer.split(b"\n", 1)
         if not raw:
             continue
+        if len(raw) > MAX_MESSAGE_BYTES:
+            raise ValueError("protocol message exceeded maximum size")
         message = json.loads(raw.decode("utf-8"))
         if not isinstance(message, dict):
             raise ValueError("protocol message must be a JSON object")
         messages.append(message)
+    if len(buffer) > MAX_MESSAGE_BYTES:
+        raise ValueError("protocol message exceeded maximum size")
     return buffer, messages
 
 

@@ -1,18 +1,16 @@
 # Distributed Task Notification and Worker System
 
-This is the final implementation for Topic 5. A TCP broker registers multiple
-workers, assigns queued tasks according to current workload, receives results,
-detects worker/task failures, and reassigns unfinished work. The broker also
-publishes worker health and load to a Ryu OpenFlow controller over TCP. The
-controller installs TCP/5000 forwarding rules for healthy workers and removes
-rules for failed workers.
+This deliverable implements a closed-loop distributed task notification system.
+The broker limits each worker to one in-flight task, requeues timed-out work,
+ignores late/duplicate results, reconnects workers, and exchanges policies with
+the Ryu controller over one persistent metrics connection.
 
 ## Architecture and protocol
 
 ```text
-worker 1 ─┐                         ┌─ Ryu/OpenFlow controller
-worker 2 ─┼─ TCP/5000 ─ broker ─────┤   TCP/5001 metrics
-           └──── Mininet switch ────┘
+workers ──┐                         ┌─ Ryu/OpenFlow controller
+          ├─ TCP/5000 ─ broker ─────┤   TCP/5001 metrics + policy
+Mininet ──┘                         └─ OpenFlow 1.3 switch
 ```
 
 Messages are compact JSON objects separated by `\n`, so fragmented and
@@ -25,12 +23,31 @@ coalesced TCP reads are handled safely.
 | `TASK` | broker -> worker | assign a task and attempt number |
 | `RESULT` | worker -> broker | return the completed result |
 | `HEARTBEAT` | worker -> broker | keep the worker lease alive |
-| `WORKER_METRICS` | broker -> controller | publish load and source IP |
+| `WORKER_METRICS` | broker -> controller | publish worker IP, load, RTT EWMA/samples, and completed count |
+| `WORKER_POLICY` | controller -> broker | HEALTHY/OVERLOADED/FAILED scheduling state |
+| `SUBMIT` | client -> broker:5002 | submit a payload |
+| `ACCEPTED` / `TASK_DONE` / `TASK_FAILED` | broker -> client | task notification lifecycle |
 
 ## Requirements
 
 The demo requires an Ubuntu VM with Python 3, Mininet, Open vSwitch, Ryu,
 and OpenFlow 1.3 support. Run `sudo mn -c` before repeating a demo.
+
+```text
+HEALTHY ──RTT/traffic threshold──> OVERLOADED
+   ▲                                      │
+   └────────────── recovered ─────────────┘
+   │
+   └── heartbeat timeout / missing metrics ──> FAILED
+FAILED ──worker reconnect + metrics──> HEALTHY
+```
+
+The controller polls flow statistics every two seconds and classifies workers
+from RTT EWMA, link status, and broker metrics. It installs a four-second
+higher-priority quarantine for overloaded workers, marks failed workers without
+deleting bootstrap forwarding, restores forwarding on recovery, and sends
+`WORKER_POLICY` back to the broker. Worker ports are deterministic: broker is
+port 1, workers are ports 2-9, and the controller host is port 10.
 
 ## Reproducible SDN demo
 
@@ -45,7 +62,7 @@ From this directory:
 2. Start the topology in another terminal:
 
    ```bash
-   sudo python3 topo.py
+   sudo python3 topo.py --workers 2
    ```
 
 3. In the Mininet CLI, start the broker with four demonstration tasks:
@@ -62,11 +79,20 @@ From this directory:
    ```text
    mininet> w1 python3 worker.py worker-1 10.0.0.10 &
    mininet> w2 python3 worker.py worker-2 10.0.0.10 &
+   mininet> c1 python3 client.py 10.0.0.10 "hello from client" &
    ```
 
-5. Observe `[DISPATCH]`, `[RESULT]`, and controller flow updates. Use
-   `w1 pkill -f worker.py` to demonstrate failure recovery; the broker removes
-   the stale worker and requeues its task to the remaining worker.
+5. Observe `[DISPATCH]`, `[RESULT]`, `[POLICY]`, and controller flow updates:
+
+   ```text
+   mininet> sh ovs-ofctl -O OpenFlow13 dump-flows s1
+   mininet> w1 pkill -f worker.py
+   mininet> sh ovs-ofctl -O OpenFlow13 dump-flows s1
+   mininet> link s1 w1 down
+   mininet> link s1 w1 up
+   ```
+
+   The worker reconnect loop and broker requeue logic should restore service.
 
 The application can also be tested without Mininet:
 
@@ -74,64 +100,88 @@ The application can also be tested without Mininet:
 python3 broker.py --demo-tasks 4
 python3 worker.py worker-1 127.0.0.1
 python3 worker.py worker-2 127.0.0.1
+python3 client.py 127.0.0.1 "hello from client"
 ```
+
+`TASK_SDN_MODE=baseline` installs only static forwarding. The default
+`closed_loop` mode enables RTT/traffic classification, policy feedback,
+quarantine, stale-metrics expiry, and port-status reactions. Broker options
+`--scheduling`, `--max-inflight`, and `--client-port` control scheduling,
+capacity, and the task client listener; worker `--slowdown` creates
+heterogeneous processing speeds.
 
 ## Testing and evaluation
 
 Run the unit tests from this directory:
 
 ```bash
-python3 -m unittest -v test_protocol.py
+python3 -m unittest -v test_protocol.py test_broker.py test_policy.py test_integration.py
 python3 -m py_compile protocol.py broker.py worker.py topo.py controller.py
 ```
 
 For a reproducible local performance comparison, run:
 
 ```bash
-python3 benchmark.py --tasks 12
+python3 benchmark.py --workers 2 4 8 --tasks 20 50 100 --repeats 3
 ```
 
-The benchmark compares the original static one-worker baseline, dynamic
-two-worker scheduling, and dynamic scheduling with one worker failing before
-its first result. It records:
+The benchmark writes `results/benchmark-results.csv` and
+`results/benchmark-results.png`. It
+compares round-robin with blind pre-assignment against least-loaded scheduling
+and records:
 
 * task completion time: broker queue time to the final `[RESULT]`;
 * throughput: completed tasks divided by elapsed seconds;
-* load balance: tasks completed by each worker;
-* recovery time: worker termination to `[DISPATCH]` on the replacement worker;
-* failure rate: tasks in `[FAILED]` divided by submitted tasks.
+* load balance: completed tasks per worker;
+* recovery time: first retried task completion after a worker fault, measured from the fault injection;
+* failed-task rate: failed tasks divided by submitted tasks.
 
-Example local loopback run (`python3 benchmark.py --tasks 12`, Windows host,
-November 2026):
+Run the benchmark inside Mininet for report numbers; loopback output is only a
+smoke test and must not be presented as the Mininet result:
 
-| Scenario | Workers | Completed | Elapsed (s) | Throughput (tasks/s) | Recovery (s) |
-|---|---:|---:|---:|---:|---:|
-| Static baseline | 1 | 12 | 0.732 | 16.38 | - |
-| Dynamic load balancing | 2 | 12 | 0.489 | 24.55 | - |
-| Dynamic + worker failure | 2 | 12 | 0.760 | 15.79 | 0.760 |
+```bash
+sudo python3 mininet_benchmark.py
+```
 
-These are local loopback measurements, not Mininet measurements. Run the
-benchmark in the target Ubuntu VM and include that output in the final report
-for environment-specific results.
+The Mininet benchmark writes separate broker, worker, and controller logs plus
+a CSV and plot under `results/`. It evaluates `baseline_rr`,
+`baseline_least`, and `closed_loop` across normal, slow-worker, and link-failure
+scenarios. Slow-worker delay is applied before tasks are dispatched; link failure
+is injected after registration and held for two seconds. Use `--repeats 1 --tasks 20` for a quick run. `TASK_SDN_MODE` can
+also be set directly to `baseline` or `closed_loop`; broker supports
+`--scheduling round_robin|least_loaded`, `--max-inflight`, and workers support
+`--slowdown`.
 
-Use the first row as the static single-worker baseline. The final
-implementation should improve throughput with two workers and preserve
-completion through a worker failure, while the SDN controller preserves
-forwarding for recovery and blocks new TCP connection attempts from workers
-whose reported load reaches `MAX_LOAD`.
+The policy thresholds are three RTT samples and at least two qualified workers
+to avoid one-sample decisions; overload is `max(1.5 * best, best + 0.3s)`;
+hold-down is 4 seconds to prevent oscillation; broker policy expiry is 15
+seconds to recover if the controller disappears. The 4-second quarantine
+isolates overloaded worker-to-broker TCP traffic and self-expires, while
+bootstrap forwarding remains installed for reconnect.
+
+## OpenFlow flow table
+
+| Priority | Match | Action | Purpose |
+|---:|---|---|---|
+| 250 | worker IP -> broker TCP/5000 | drop, hard timeout 4s | temporary overload quarantine |
+| 200 | IPv4 TCP dst broker/5000 | output 1 | worker/task ingress |
+| 200 | broker -> worker TCP/5000 | worker port | task dispatch and return traffic |
+| 200 | IPv4 TCP dst controller/5001 | output 10 | broker metrics ingress |
+| 200 | controller -> broker TCP/5001 | output 1 | policy return path |
+| 200 | client/broker TCP/5002 | ports 1/11 | task client path |
+| 100 | ARP | flood | address resolution |
+| 100 | ICMP IPv4 destination | host port | ping and diagnostics |
+| 0 | all other traffic | drop | explicit table-miss behavior |
 
 ## Rubric coverage
 
-* **D1:** architecture, newline-delimited TCP socket implementation, concurrent
-  workers, Mininet topology, Ryu/OpenFlow integration, and initial tests.
-* **D2 complete functionality:** queueing, least-loaded scheduling, result
-  acknowledgements, heartbeats, timeouts, duplicate-ID rejection, and bounded
-  input validation.
-* **D2 dynamic SDN:** broker metrics control higher-priority overload drops.
-  Bootstrap forwarding remains installed for registration and failed-worker
-  recovery.
-  Bootstrap flows cover broker/worker traffic before registration; workload
-  metrics install a higher-priority TCP SYN drop for overloaded workers.
-* **D2 robustness:** worker disconnect and task timeout requeue unfinished tasks.
-* **D2 performance:** `benchmark.py` performs repeatable one-worker,
-  two-worker, and failure experiments and prints throughput and recovery data.
+* **D2 complete functionality:** serial workers, bounded scheduling, result
+  acknowledgements, heartbeats, reconnects, timeouts, duplicate-ID rejection,
+  late-result handling, and bounded input validation.
+* **D2 dynamic SDN:** two-second flow polling, RTT/link-state classification,
+  controller-to-broker policy feedback, expiring overload quarantine,
+  failed-worker policy, and deterministic port mapping.
+* **D2 robustness:** worker disconnect, link failure, and task timeout requeue
+  unfinished tasks.
+* **D2 performance:** `benchmark.py` runs 2/4/8-worker and 20/50/100-task
+  configurations with three repeats, CSV output, and error-bar plots.

@@ -21,6 +21,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(messages, [])
         self.assertEqual(buffer, b'{"type":"RESULT"}')
 
+    def test_many_valid_frames_do_not_exceed_total_buffer_limit(self) -> None:
+        chunk = b'{"value":"ok"}\n' * 5000
+        remainder, messages = read_messages(b"", chunk)
+        self.assertEqual(remainder, b"")
+        self.assertEqual(len(messages), 5000)
+
 
 if __name__ == "__main__":
     unittest.main()
