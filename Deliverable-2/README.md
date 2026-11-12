@@ -173,15 +173,3 @@ bootstrap forwarding remains installed for reconnect.
 | 100 | ICMP IPv4 destination | host port | ping and diagnostics |
 | 0 | all other traffic | drop | explicit table-miss behavior |
 
-## Rubric coverage
-
-* **D2 complete functionality:** serial workers, bounded scheduling, result
-  acknowledgements, heartbeats, reconnects, timeouts, duplicate-ID rejection,
-  late-result handling, and bounded input validation.
-* **D2 dynamic SDN:** two-second flow polling, RTT/link-state classification,
-  controller-to-broker policy feedback, expiring overload quarantine,
-  failed-worker policy, and deterministic port mapping.
-* **D2 robustness:** worker disconnect, link failure, and task timeout requeue
-  unfinished tasks.
-* **D2 performance:** `benchmark.py` runs 2/4/8-worker and 20/50/100-task
-  configurations with three repeats, CSV output, and error-bar plots.
