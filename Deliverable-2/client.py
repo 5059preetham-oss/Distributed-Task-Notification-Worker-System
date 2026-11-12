@@ -1,38 +1,40 @@
-"""Interactive TCP task client."""
-
-from __future__ import annotations
-
-import argparse
+"""
+Submit a task to the broker.
+Examples:
+  python3 client.py sum 10 20 30
+  python3 client.py uppercase "hello mininet"
+  python3 client.py reverse "distributed systems"
+"""
 import json
 import socket
+import sys
+
+BROKER_HOST = "10.0.0.1"
+CLIENT_PORT = 6000
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("broker_host", nargs="?", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=5002)
-    parser.add_argument("payload", nargs="?")
-    args = parser.parse_args()
-    with socket.create_connection((args.broker_host, args.port), timeout=10) as conn:
-        payload = args.payload
-        if payload is None:
-            payload = input("payload> ")
-        conn.sendall(f"SUBMIT {payload}\n".encode("utf-8"))
-        buffer = b""
-        while True:
-            chunk = conn.recv(4096)
-            if not chunk:
-                return
-            buffer += chunk
-            while b"\n" in buffer:
-                raw, buffer = buffer.split(b"\n", 1)
-                line = raw.decode("utf-8")
-                print(line, flush=True)
-                if line.startswith("TASK_DONE "):
-                    json.loads(line[10:])
-                    return
-                if line.startswith("TASK_FAILED "):
-                    return
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: python3 client.py sum <numbers...>")
+        print('   or: python3 client.py uppercase|reverse "<text>"')
+        return
+
+    task = sys.argv[1].lower()
+    if task == "sum":
+        payload = [float(x) if "." in x else int(x) for x in sys.argv[2:]]
+    elif task in ("uppercase", "reverse"):
+        payload = " ".join(sys.argv[2:])
+    else:
+        print("Unsupported task. Use sum, uppercase, or reverse.")
+        return
+
+    request = {"task": task, "payload": payload}
+    with socket.create_connection((BROKER_HOST, CLIENT_PORT), timeout=10) as sock:
+        sock.sendall((json.dumps(request) + "\\n").encode())
+        reader = sock.makefile("r", encoding="utf-8")
+        response = reader.readline()
+        print(json.dumps(json.loads(response), indent=2) if response else "No response")
+        reader.close()
 
 
 if __name__ == "__main__":

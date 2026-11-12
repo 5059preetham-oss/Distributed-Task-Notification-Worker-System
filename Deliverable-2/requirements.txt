@@ -1,3 +1,0 @@
-ryu
-eventlet==0.30.3
-matplotlib
